@@ -17,6 +17,15 @@ object PclRenderer {
         val mono = ImageUtils.toMonochrome(bitmap)
         val widthBytes = (mono.width + 7) / 8
 
+        // --- Enveloppe PJL (Printer Job Language) ---
+        // La plupart des imprimantes de bureau (laser/jet d'encre multifonctions)
+        // ignorent silencieusement du PCL brut si la tâche n'est pas explicitement
+        // annoncée via PJL. UEL (Universal Exit Language) + @PJL ENTER LANGUAGE=PCL
+        // indique à l'imprimante d'entrer en mode PCL pour ce job.
+        writeUel(out)
+        writePjlLine(out, "@PJL JOB NAME=\"NokoPrint\"")
+        writePjlLine(out, "@PJL ENTER LANGUAGE=PCL")
+
         // Reset imprimante
         out.write(ESC); out.write('E'.code)
 
@@ -38,7 +47,24 @@ object PclRenderer {
         // Éjection de page
         out.write(0x0C)
 
+        // --- Fin de tâche PJL ---
+        writeUel(out)
+        writePjlLine(out, "@PJL EOJ")
+        writeUel(out)
+
         return out.toByteArray()
+    }
+
+    /** Universal Exit Language : Esc%-12345X — bascule l'imprimante en mode interprétation PJL. */
+    private fun writeUel(out: ByteArrayOutputStream) {
+        out.write(ESC)
+        out.write("%-12345X".toByteArray(Charsets.US_ASCII))
+    }
+
+    /** Écrit une commande PJL terminée par CR LF, comme l'exige la spécification PJL. */
+    private fun writePjlLine(out: ByteArrayOutputStream, line: String) {
+        out.write(line.toByteArray(Charsets.US_ASCII))
+        out.write(0x0D); out.write(0x0A)
     }
 
     private fun writeEsc(out: ByteArrayOutputStream, sequence: String) {

@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    Filtre large : on laisse Android notifier l'app pour la plupart des
+    périphériques USB, puis on vérifie nous-mêmes en code que la classe
+    d'interface est bien 7 (Printer Class), voir UsbPrinterManager.kt.
+    On ne peut pas filtrer par "classe d'interface" directement dans ce XML.
+-->
+<resources>
+    <usb-device />
+</resources>

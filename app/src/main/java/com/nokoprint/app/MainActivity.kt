@@ -7,6 +7,7 @@ import android.hardware.usb.UsbDevice
 import android.hardware.usb.UsbManager
 import android.net.Uri
 import android.os.Bundle
+import android.util.Log
 import android.widget.Button
 import android.widget.RadioGroup
 import android.widget.TextView
@@ -21,6 +22,10 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 class MainActivity : AppCompatActivity() {
+
+    companion object {
+        private const val TAG = "NokoPrint/Main"
+    }
 
     private lateinit var usbManager: UsbPrinterManager
     private var currentDevice: UsbDevice? = null
@@ -110,10 +115,19 @@ class MainActivity : AppCompatActivity() {
             textStatus.text = "جارٍ الإرسال عبر $language ..."
 
             CoroutineScope(Dispatchers.Main).launch {
-                val success = withContext(Dispatchers.IO) {
-                    printImage(device, imageUri, language)
+                val result = withContext(Dispatchers.IO) {
+                    try {
+                        if (printImage(device, imageUri, language)) "OK" else "ECHEC"
+                    } catch (e: Exception) {
+                        Log.e(TAG, "Exception pendant l'impression", e)
+                        "EXCEPTION: ${e.javaClass.simpleName}: ${e.message}"
+                    }
                 }
-                textStatus.text = if (success) "تم إرسال المهمة إلى الطابعة" else "فشل الإرسال — راجع الاتصال والإذن"
+                textStatus.text = when {
+                    result == "OK" -> "تم إرسال المهمة إلى الطابعة"
+                    result == "ECHEC" -> "فشل الإرسال — راجع الاتصال والإذن (شوف logcat)"
+                    else -> "خطأ: $result"
+                }
             }
         }
     }
@@ -130,22 +144,36 @@ class MainActivity : AppCompatActivity() {
     private fun printImage(device: UsbDevice, imageUri: Uri, language: String): Boolean {
         val bitmap = contentResolver.openInputStream(imageUri)?.use {
             BitmapFactory.decodeStream(it)
-        } ?: return false
+        } ?: run {
+            Log.e(TAG, "printImage: impossible de décoder l'image sélectionnée")
+            return false
+        }
+        Log.d(TAG, "printImage: image décodée ${bitmap.width}x${bitmap.height}, langage=$language")
 
         val payload: ByteArray = when (language) {
             "PCL" -> PclRenderer.render(bitmap)
             else -> EscPosRenderer.render(bitmap)
         }
+        Log.d(TAG, "printImage: payload généré = ${payload.size} octet(s)")
 
         val androidUsbManager = getSystemService(Context.USB_SERVICE) as UsbManager
-        val connection = androidUsbManager.openDevice(device) ?: return false
+        if (!androidUsbManager.hasPermission(device)) {
+            Log.e(TAG, "printImage: permission USB non accordée pour ce device")
+            return false
+        }
+        val connection = androidUsbManager.openDevice(device) ?: run {
+            Log.e(TAG, "printImage: openDevice() a retourné null")
+            return false
+        }
         val handle = usbManager.open(device) ?: run {
+            Log.e(TAG, "printImage: aucune interface/endpoint imprimante trouvée")
             connection.close()
             return false
         }
 
         val ok = usbManager.sendRaw(connection, handle, payload)
         connection.close()
+        Log.d(TAG, "printImage: résultat sendRaw = $ok")
         return ok
     }
 }

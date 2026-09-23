@@ -11,6 +11,8 @@ import android.hardware.usb.UsbDeviceConnection
 import android.hardware.usb.UsbEndpoint
 import android.hardware.usb.UsbInterface
 import android.hardware.usb.UsbManager
+import android.util.Log
+import androidx.core.content.ContextCompat
 
 /**
  * Couche de communication générique avec une imprimante USB, basée sur la
@@ -26,6 +28,7 @@ import android.hardware.usb.UsbManager
 class UsbPrinterManager(private val context: Context) {
 
     companion object {
+        private const val TAG = "NokoPrint/Usb"
         const val ACTION_USB_PERMISSION = "com.nokoprint.app.USB_PERMISSION"
         private const val USB_CLASS_PRINTER = UsbConstants.USB_CLASS_PRINTER // 7
 
@@ -72,20 +75,18 @@ class UsbPrinterManager(private val context: Context) {
         val pendingIntent = PendingIntent.getBroadcast(
             context, 0, Intent(ACTION_USB_PERMISSION), flags
         )
-
-        // Sur Android 13+ (API 33+), tout registerReceiver() pour une action
-        // non-système DOIT préciser RECEIVER_EXPORTED ou RECEIVER_NOT_EXPORTED,
-        // sinon le système lève une SecurityException et l'app plante ici.
-        if (android.os.Build.VERSION.SDK_INT >= 33) {
-            context.registerReceiver(
-                receiver,
-                IntentFilter(ACTION_USB_PERMISSION),
-                Context.RECEIVER_NOT_EXPORTED
-            )
-        } else {
-            context.registerReceiver(receiver, IntentFilter(ACTION_USB_PERMISSION))
-        }
-
+        // A partir d'Android 13 (API 33), un receiver enregistré dynamiquement DOIT
+        // préciser RECEIVER_EXPORTED ou RECEIVER_NOT_EXPORTED, sinon
+        // context.registerReceiver() lève une SecurityException à l'exécution.
+        // C'était le cas ici (targetSdk = 34) : la demande de permission pouvait
+        // planter silencieusement avant même que la boîte de dialogue système
+        // ne s'affiche. ContextCompat gère la compatibilité avec les anciennes
+        // versions automatiquement.
+        ContextCompat.registerReceiver(
+            context, receiver, IntentFilter(ACTION_USB_PERMISSION),
+            ContextCompat.RECEIVER_NOT_EXPORTED
+        )
+        Log.d(TAG, "Demande de permission USB envoyée pour ${device.deviceName}")
         manager.requestPermission(device, pendingIntent)
     }
 
@@ -111,17 +112,26 @@ class UsbPrinterManager(private val context: Context) {
      * donnée la plus utile pour décider quel format envoyer.
      */
     fun readDeviceId(connection: UsbDeviceConnection, iface: UsbInterface): String? {
-        if (!connection.claimInterface(iface, true)) return null
+        if (!connection.claimInterface(iface, true)) {
+            Log.e(TAG, "readDeviceId: claimInterface a échoué (interface ${iface.id})")
+            return null
+        }
         val buffer = ByteArray(1024)
+        // wIndex = (numéro d'interface << 8) | alternate setting, selon la
+        // spécification IEEE 1284 / USB Printer Class. Utiliser iface.id seul
+        // ne fonctionne que par coïncidence quand l'interface imprimante est
+        // l'interface n°0 d'un périphérique à interface unique.
+        val wIndex = (iface.id shl 8) or iface.alternateSetting
         val length = connection.controlTransfer(
             REQUEST_TYPE_CLASS_IN,
             GET_DEVICE_ID_REQUEST,
             0, // wValue: configuration index (0 = courante)
-            iface.id,
+            wIndex,
             buffer,
             buffer.size,
             5000
         )
+        Log.d(TAG, "readDeviceId: controlTransfer a retourné $length octet(s)")
         if (length < 2) return null
         // Les 2 premiers octets = longueur totale (big-endian), le reste = chaîne ASCII
         return String(buffer, 2, length - 2, Charsets.US_ASCII)
@@ -129,15 +139,39 @@ class UsbPrinterManager(private val context: Context) {
 
     /** Envoie des octets bruts déjà mis en forme (PCL, ESC/POS...) vers l'imprimante. */
     fun sendRaw(connection: UsbDeviceConnection, handle: PrinterHandle, data: ByteArray): Boolean {
-        if (!connection.claimInterface(handle.usbInterface, true)) return false
+        Log.d(
+            TAG,
+            "sendRaw: ${data.size} octet(s) à envoyer, endpoint=${handle.endpointOut.address}, " +
+                "interface=${handle.usbInterface.id}, maxPacketSize=${handle.endpointOut.maxPacketSize}"
+        )
+        if (!connection.claimInterface(handle.usbInterface, true)) {
+            Log.e(TAG, "sendRaw: claimInterface a échoué — l'interface est peut-être déjà tenue")
+            return false
+        }
         var offset = 0
         val chunkSize = 16 * 1024
-        while (offset < data.size) {
-            val len = minOf(chunkSize, data.size - offset)
-            val sent = connection.bulkTransfer(handle.endpointOut, data, offset, len, 15000)
-            if (sent < 0) return false
-            offset += sent
+        try {
+            while (offset < data.size) {
+                val len = minOf(chunkSize, data.size - offset)
+                val sent = connection.bulkTransfer(handle.endpointOut, data, offset, len, 15000)
+                Log.d(TAG, "sendRaw: bulkTransfer a envoyé $sent / $len octet(s) (offset=$offset)")
+                if (sent < 0) {
+                    Log.e(TAG, "sendRaw: bulkTransfer a échoué à l'offset $offset")
+                    return false
+                }
+                if (sent == 0) {
+                    Log.e(TAG, "sendRaw: bulkTransfer a retourné 0 — arrêt pour éviter une boucle infinie")
+                    return false
+                }
+                offset += sent
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "sendRaw: exception pendant l'envoi", e)
+            return false
+        } finally {
+            connection.releaseInterface(handle.usbInterface)
         }
+        Log.d(TAG, "sendRaw: envoi terminé avec succès ($offset octet(s))")
         return true
     }
 

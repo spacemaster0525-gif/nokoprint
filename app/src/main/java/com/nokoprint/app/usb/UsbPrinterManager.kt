@@ -72,7 +72,20 @@ class UsbPrinterManager(private val context: Context) {
         val pendingIntent = PendingIntent.getBroadcast(
             context, 0, Intent(ACTION_USB_PERMISSION), flags
         )
-        context.registerReceiver(receiver, IntentFilter(ACTION_USB_PERMISSION))
+
+        // Sur Android 13+ (API 33+), tout registerReceiver() pour une action
+        // non-système DOIT préciser RECEIVER_EXPORTED ou RECEIVER_NOT_EXPORTED,
+        // sinon le système lève une SecurityException et l'app plante ici.
+        if (android.os.Build.VERSION.SDK_INT >= 33) {
+            context.registerReceiver(
+                receiver,
+                IntentFilter(ACTION_USB_PERMISSION),
+                Context.RECEIVER_NOT_EXPORTED
+            )
+        } else {
+            context.registerReceiver(receiver, IntentFilter(ACTION_USB_PERMISSION))
+        }
+
         manager.requestPermission(device, pendingIntent)
     }
 
